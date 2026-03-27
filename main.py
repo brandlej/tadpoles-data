@@ -9,7 +9,15 @@ from graph import plot_hours
 
 
 BASE_URL = "https://www.tadpoles.com"
-EVENTS_QUERY_ENDPOINT = "/remote/v2/events/query"
+EVENTS_QUERY_ENDPOINT = "remote/v2/events/query"
+HEADERS = {
+    "Content-Type": "application/json",
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": f"{BASE_URL}/parents",
+    "Origin": BASE_URL,
+    "X-TADPOLES-DEVICE-PLATFORM": "web",
+    "X-TADPOLES-APP-ID": "com.tadpoles.web.parent",
+}
 
 
 def main():
@@ -18,7 +26,10 @@ def main():
     # (year, month) / hours napped
     hours_napped_by_month: dict[tuple[int, int], float] = {}
 
-    ranges = get_month_ranges_between(datetime(year, month, 1), datetime(2026, 11, 1))
+    ranges = get_month_ranges_between(
+        datetime(year, month, 1),
+        datetime(datetime.now().year, datetime.now().month, 1),
+    )
 
     session = get_session()
 
@@ -41,15 +52,15 @@ def bootstrap_flags():
 
 
 def validate_args(args: Namespace) -> tuple[int, int]:
-    # argparse already validates type
     month = args.month
     year = args.year
 
     if not 1 <= month <= 12:
         sys.exit("Month must be between 1 and 12")
 
-    if year > datetime.now().year:
-        sys.exit(f"Year must be <= {datetime.now().year}")
+    current_year = datetime.now().year
+    if year > current_year:
+        sys.exit(f"Year must be <= {current_year}")
 
     return year, month
 
@@ -57,7 +68,7 @@ def validate_args(args: Namespace) -> tuple[int, int]:
 def query_events_for_month(session: Session, month: int, year: int):
     next_year, next_month_value = get_next_month(year, month)
 
-    body: dict[str, str | int] = {
+    body = {
         "direction": "range",
         "event_timestamp": int(datetime(year, month, 1).timestamp() * 1000),
         "end_event_timestamp": int(
@@ -67,43 +78,45 @@ def query_events_for_month(session: Session, month: int, year: int):
         "client": "dashboard",
     }
 
-    headers = {
-        "Content-Type": "application/json",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": f"{BASE_URL}/home_or_work",
-        "Origin": BASE_URL,
-    }
-
     # Tadpoles looks like it uses cursor based pagination
-    # To harden: Need to loop through pages and concat togather
-    # Inspecting payloads in UI, it uses 300 as the item size which seems to grab all events
+    # To harden: Loop through pages and concat togather
+    # Inspecting payloads in UI, it uses 300 as the item size which seems to grab all events for now
     response = session.post(
         f"{BASE_URL}/{EVENTS_QUERY_ENDPOINT}",
         json=body,
-        headers=headers,
+        headers=HEADERS,
     )
 
     if not response.ok:
-        raise RuntimeError("Something went wrong")
+        raise RuntimeError(f"Something went wrong ({response.status_code})")
 
     return response.json()
 
 
 def get_unique_nap_entries(events):
-    daily_reports = [event for event in events if event["type"] == "DailyReport"]
-    nap_entries = [
+    seen_ids = set()
+    unique_nap_entries = []
+
+    daily_reports = [event for event in events if event.get("type") == "DailyReport"]
+    entries = [
         entry
         for report in daily_reports
-        for entry in report["entries"]
-        if entry["type_name"] == "nap"
+        for entry in (report.get("entries") or report.get("legacy_entries") or [])
     ]
 
-    seen_ids: set[str] = set()
-    unique_nap_entries = []
-    # probably a more pythonic was to do below with list comprehension
-    for entry in nap_entries:
-        if not entry["start_time"] or not entry["end_time"]:
+    for entry in entries:
+        # "type" is legacy key
+        entry_type = entry.get("type_name") or entry.get("type")
+
+        if entry_type != "nap":
             continue
+
+        start = entry.get("start_time")
+        end = entry.get("end_time")
+
+        if not start or not end:
+            continue
+
         if entry["id"] in seen_ids:
             continue
 
